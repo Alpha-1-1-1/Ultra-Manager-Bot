@@ -1,0 +1,27 @@
+# Secrets and environment variables
+.env
+.env.local
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Database files
+bot_data.db
+*.sqlite3
+*.db
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Temporary media and partial downloads
+*.tmp
+*.part
+*.ytdl
+downloads/
+temp/
