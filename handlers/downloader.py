@@ -3,6 +3,7 @@ import re
 import glob
 import math
 import uuid
+import html
 import logging
 import asyncio
 import tempfile
@@ -20,7 +21,7 @@ import yt_dlp
 
 logger = logging.getLogger(__name__)
 
-# Strict limits for Telegram Bot API (Telegram strictly rejects anything >= 50MB)
+# Strict safety limits for Telegram Bot API (Telegram strictly rejects anything >= 50MB)
 TARGET_CHUNK_MB = 35                  # Safe target size for each part
 MAX_ALLOWED_BYTES = 46 * 1024 * 1024  # 46 MB hard ceiling
 MAX_DOWNLOAD_LIMIT = 4000 * 1024 * 1024  # 4 GB download ceiling
@@ -81,7 +82,6 @@ def split_video_into_parts(video_file: str, duration: Optional[float] = None) ->
     split_subdir = os.path.join(out_dir, f"split_{uuid.uuid4().hex[:6]}")
     os.makedirs(split_subdir, exist_ok=True)
 
-    # Use clean, predictable chunk naming (avoids glob bracket issues like [Official Video])
     output_pattern = os.path.join(split_subdir, "chunk_%03d.mp4")
 
     attempt = 1
@@ -103,7 +103,7 @@ def split_video_into_parts(video_file: str, duration: Optional[float] = None) ->
             if parts and all(os.path.getsize(p) <= MAX_ALLOWED_BYTES for p in parts):
                 return parts
 
-            # If any chunk exceeded limit due to wide keyframe intervals, decrease duration and retry
+            # If any chunk exceeded limit, decrease duration and retry
             segment_duration = max(3, int(segment_duration * 0.65))
             for p in parts:
                 try:
@@ -115,7 +115,6 @@ def split_video_into_parts(video_file: str, duration: Optional[float] = None) ->
 
         attempt += 1
 
-    # Final check of generated parts
     parts = sorted(glob.glob(os.path.join(split_subdir, "chunk_*.mp4")))
     valid_parts = [p for p in parts if os.path.exists(p) and os.path.getsize(p) <= MAX_ALLOWED_BYTES]
     return valid_parts if valid_parts else [video_file]
@@ -177,7 +176,7 @@ def get_quality_keyboard(session_id: str) -> InlineKeyboardMarkup:
         quality_buttons.append(row)
 
     quality_buttons.append([
-        InlineKeyboardButton("⚡ Best Quality (Full HD/4K Auto-Split)", callback_data=f"dl:exec_v:{session_id}:best")
+        InlineKeyboardButton("⚡ Best Quality (Auto-Split Enabled)", callback_data=f"dl:exec_v:{session_id}:best")
     ])
 
     quality_buttons.append([
@@ -211,7 +210,7 @@ async def process_video_link(url: str, update: Update, context: ContextTypes.DEF
     except Exception as e:
         logger.error(f"Error fetching metadata: {e}")
         try:
-            await status_msg.edit_text(f"❌ Could not retrieve video from link.\nError: `{str(e)[:150]}`", parse_mode="Markdown")
+            await status_msg.edit_text(f"❌ Could not retrieve video from link: {str(e)[:150]}")
         except Exception:
             pass
         return
@@ -246,17 +245,24 @@ async def process_video_link(url: str, update: Update, context: ContextTypes.DEF
         "fn_template": "%(title)s.%(ext)s",
     }
 
+    # Use HTML escaping so special characters like _, *, [ ], ( ) never crash Telegram's parser
+    escaped_title = html.escape(title)
+    escaped_uploader = html.escape(uploader)
+    escaped_extractor = html.escape(extractor)
+
     caption = (
-        f"🎬 **{title}**\n\n"
-        f"👤 **Channel**: {uploader}\n"
-        f"⏱️ **Duration**: {duration}\n"
-        f"🌐 **Platform**: {extractor}\n"
-        "✂️ **Auto-Split Engine**: Active (Parts strictly < 46MB)\n\n"
+        f"🎬 <b>{escaped_title}</b>\n\n"
+        f"👤 <b>Channel</b>: {escaped_uploader}\n"
+        f"⏱️ <b>Duration</b>: {duration}\n"
+        f"🌐 <b>Platform</b>: {escaped_extractor}\n"
+        "✂️ <b>Auto-Split Engine</b>: Active (Parts strictly &lt; 46MB)\n\n"
         "Choose an option below:"
     )
 
     keyboard = get_main_options_keyboard(session_id)
 
+    # Attempt to send photo with HTML caption
+    sent_thumbnail = False
     if thumbnail_url:
         try:
             await context.bot.send_photo(
@@ -264,17 +270,28 @@ async def process_video_link(url: str, update: Update, context: ContextTypes.DEF
                 photo=thumbnail_url,
                 caption=caption,
                 reply_markup=keyboard,
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
-            return
+            sent_thumbnail = True
         except Exception as e:
-            logger.warning(f"Could not send thumbnail by URL: {e}")
+            logger.warning(f"send_photo with URL failed ({e}), falling back to text message...")
 
-    await update.message.reply_text(
-        text=caption,
-        reply_markup=keyboard,
-        parse_mode="Markdown"
-    )
+    # Fallback to text message if thumbnail couldn't be sent directly
+    if not sent_thumbnail:
+        try:
+            await update.message.reply_text(
+                text=caption,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            # Absolute fallback with plain text
+            logger.error(f"Failed to send HTML message ({e}), falling back to plain text...")
+            plain_caption = f"🎬 {title}\n\n👤 Channel: {uploader}\n⏱️ Duration: {duration}\n🌐 Platform: {extractor}\n\nChoose an option below:"
+            await update.message.reply_text(
+                text=plain_caption,
+                reply_markup=keyboard
+            )
 
 async def download_video_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
@@ -378,8 +395,7 @@ async def downloader_callback_handler(update: Update, context: ContextTypes.DEFA
             await context.bot.send_photo(
                 chat_id=update.effective_chat.id,
                 photo=thumb_url,
-                caption=f"🖼️ Thumbnail for: **{session.get('title')}**",
-                parse_mode="Markdown"
+                caption=f"🖼️ Thumbnail for: {session.get('title')}"
             )
             await context.bot.send_document(
                 chat_id=update.effective_chat.id,
@@ -453,24 +469,23 @@ async def _execute_video_download(query, context: ContextTypes.DEFAULT_TYPE, ses
             total_parts = len(parts_to_upload)
 
             if total_parts > 1:
-                await progress_msg.edit_text(f"✂️ File is `{total_size_mb} MB`. Sliced into {total_parts} parts for 100% upload delivery...")
+                await progress_msg.edit_text(f"✂️ File is {total_size_mb} MB. Sliced into {total_parts} parts for 100% upload delivery...")
             else:
-                await progress_msg.edit_text(f"📤 Uploading video to Telegram (`{total_size_mb} MB`)...")
+                await progress_msg.edit_text(f"📤 Uploading video to Telegram ({total_size_mb} MB)...")
 
             for idx, part_file in enumerate(parts_to_upload, 1):
                 part_size_mb = round(os.path.getsize(part_file) / (1024 * 1024), 2)
 
                 if total_parts > 1:
-                    caption = f"🎬 **{title}** (Part {idx}/{total_parts})\n📦 Size: `{part_size_mb} MB`\n\nDownloaded via Ultra Manager Bot"
+                    caption = f"🎬 {title} (Part {idx}/{total_parts})\n📦 Size: {part_size_mb} MB\n\nDownloaded via Ultra Manager Bot"
                 else:
-                    caption = f"🎬 **{title}**\n📦 Size: `{part_size_mb} MB`\n\nDownloaded via Ultra Manager Bot"
+                    caption = f"🎬 {title}\n📦 Size: {part_size_mb} MB\n\nDownloaded via Ultra Manager Bot"
 
                 with open(part_file, "rb") as vf:
                     await context.bot.send_video(
                         chat_id=chat_id,
                         video=vf,
                         caption=caption,
-                        parse_mode="Markdown",
                         read_timeout=300,
                         write_timeout=300,
                         connect_timeout=60
@@ -483,7 +498,7 @@ async def _execute_video_download(query, context: ContextTypes.DEFAULT_TYPE, ses
         except Exception as e:
             logger.error(f"Download execution error: {e}")
             try:
-                await progress_msg.edit_text(f"❌ Download failed: `{str(e)[:150]}`", parse_mode="Markdown")
+                await progress_msg.edit_text(f"❌ Download failed: {str(e)[:150]}")
             except Exception:
                 pass
 
@@ -532,7 +547,7 @@ async def _execute_audio_download(query, context: ContextTypes.DEFAULT_TYPE, ses
             title = info.get("title", "Audio")
             uploader = info.get("uploader") or info.get("channel") or "Unknown"
 
-            caption = f"🎵 **{title}**\n👤 {uploader}\n📦 Size: `{file_size_mb} MB`\n\nExtracted via Ultra Manager Bot"
+            caption = f"🎵 {title}\n👤 {uploader}\n📦 Size: {file_size_mb} MB\n\nExtracted via Ultra Manager Bot"
 
             await progress_msg.edit_text("📤 Uploading audio to Telegram...")
             with open(audio_file, "rb") as af:
@@ -542,7 +557,6 @@ async def _execute_audio_download(query, context: ContextTypes.DEFAULT_TYPE, ses
                     title=title,
                     performer=uploader,
                     caption=caption,
-                    parse_mode="Markdown",
                     read_timeout=300,
                     write_timeout=300,
                     connect_timeout=60
@@ -555,7 +569,7 @@ async def _execute_audio_download(query, context: ContextTypes.DEFAULT_TYPE, ses
         except Exception as e:
             logger.error(f"Audio extraction error: {e}")
             try:
-                await progress_msg.edit_text(f"❌ Audio extraction failed: `{str(e)[:150]}`", parse_mode="Markdown")
+                await progress_msg.edit_text(f"❌ Audio extraction failed: {str(e)[:150]}")
             except Exception:
                 pass
 
@@ -622,7 +636,7 @@ async def cut_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             video_file = files[0]
             file_size = os.path.getsize(video_file)
             file_size_mb = round(file_size / (1024 * 1024), 2)
-            caption = f"✂️ **Cut Segment**: {start_time} - {end_time}\n📦 Size: `{file_size_mb} MB`\n\nVia Ultra Manager Bot"
+            caption = f"✂️ Cut Segment: {start_time} - {end_time}\n📦 Size: {file_size_mb} MB\n\nVia Ultra Manager Bot"
 
             parts_to_upload = split_video_into_parts(video_file, duration=abs(end_s - start_s))
             for part in parts_to_upload:
@@ -631,7 +645,6 @@ async def cut_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                         chat_id=update.effective_chat.id,
                         video=vf,
                         caption=caption,
-                        parse_mode="Markdown",
                         read_timeout=300,
                         write_timeout=300,
                         connect_timeout=60
@@ -644,6 +657,6 @@ async def cut_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except Exception as e:
             logger.error(f"Cut error: {e}")
             try:
-                await progress_msg.edit_text(f"❌ Failed to cut: `{str(e)[:150]}`", parse_mode="Markdown")
+                await progress_msg.edit_text(f"❌ Failed to cut: {str(e)[:150]}")
             except Exception:
                 pass

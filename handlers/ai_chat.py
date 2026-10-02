@@ -1,5 +1,7 @@
 import io
 import os
+import time
+import asyncio
 import logging
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -7,12 +9,8 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-CANDIDATE_MODELS = [
-    "gemini-3.8-flash",
-    "gemini-2.5-flash",
-    "gemini-2.5-pro",
-    "gemini-2.0-flash",
-]
+# Exclusively use modern Gemini 3.8 Flash (no deprecated 2.0 or 2.5 models)
+PRIMARY_MODEL = "gemini-3.8-flash"
 
 def _get_genai_client():
     api_key = os.getenv("GEMINI_API_KEY", "")
@@ -53,7 +51,6 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
         return
 
-    # Extract prompt
     prompt = " ".join(context.args) if context.args else None
 
     # Check for photos
@@ -87,22 +84,24 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     contents = [image, prompt or "Describe this image in detail."] if image else prompt
 
+    # Call Gemini 3.8 Flash with automatic retry on transient spikes
     last_error = None
-    for model_name in CANDIDATE_MODELS:
+    for attempt in range(1, 3):
         try:
             response = client.models.generate_content(
-                model=model_name,
+                model=PRIMARY_MODEL,
                 contents=contents
             )
             if response and response.text:
                 await status_msg.edit_text(response.text)
                 return
         except Exception as e:
-            logger.warning(f"Model {model_name} failed: {e}. Trying fallback...")
             last_error = str(e)
+            logger.warning(f"Gemini 3.8 Flash attempt {attempt} failed: {e}")
+            if attempt == 1:
+                await asyncio.sleep(1.5)
 
     await status_msg.edit_text(
-        f"❌ Could not reach Gemini AI models.\n"
-        f"Error details: `{last_error}`",
+        f"❌ Error communicating with Gemini 3.8 Flash:\n`{last_error}`",
         parse_mode="Markdown"
     )
