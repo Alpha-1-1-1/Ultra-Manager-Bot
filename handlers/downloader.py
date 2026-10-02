@@ -29,7 +29,7 @@ MAX_DOWNLOAD_LIMIT = 4000 * 1024 * 1024  # 4 GB download ceiling
 video_sessions: Dict[str, Dict[str, Any]] = {}
 
 def get_speed_ydl_opts(extra_opts: dict = None) -> dict:
-    """Builds optimized yt-dlp options for maximum parallel download speed and cloud datacenter bypass."""
+    """Builds optimized yt-dlp options for maximum speed, JS challenge solving, and cloud datacenter bypass."""
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -38,13 +38,30 @@ def get_speed_ydl_opts(extra_opts: dict = None) -> dict:
         "http_chunk_size": 10485760,
         "retries": 10,
         "fragment_retries": 10,
-        # Bypasses Render/AWS/GCP datacenter IP blocking by using Android/iOS mobile APIs
+        "merge_output_format": "mp4",
+        # Enable JS runtimes (Node / Deno) and remote challenge solver to defeat YouTube obfuscation
+        "js_runtimes": {"node": {}, "deno": {}},
+        "remote_components": ["ejs:github"],
+        # Resilient player clients: default (visionos/web), web_embedded, mweb, and android
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "ios", "mweb"]
+                "player_client": ["default", "web_embedded", "mweb", "android"]
             }
         },
     }
+
+    # Automatically load YouTube cookies if present (bypasses datacenter bot checks)
+    cookie_file = os.getenv("YOUTUBE_COOKIES_FILE", "cookies.txt")
+    if os.path.exists(cookie_file) and os.path.getsize(cookie_file) > 0:
+        opts["cookiefile"] = cookie_file
+    elif os.getenv("YOUTUBE_COOKIES"):
+        try:
+            temp_cookie_path = os.path.join(tempfile.gettempdir(), "render_yt_cookies.txt")
+            with open(temp_cookie_path, "w", encoding="utf-8") as f:
+                f.write(os.getenv("YOUTUBE_COOKIES"))
+            opts["cookiefile"] = temp_cookie_path
+        except Exception:
+            pass
 
     if shutil.which("aria2c"):
         opts["external_downloader"] = {"default": "aria2c"}
@@ -201,6 +218,7 @@ async def process_video_link(url: str, update: Update, context: ContextTypes.DEF
     })
 
     loop = asyncio.get_event_loop()
+    info = None
     try:
         def _extract():
             with yt_dlp.YoutubeDL(fast_opts) as ydl:
@@ -208,12 +226,27 @@ async def process_video_link(url: str, update: Update, context: ContextTypes.DEF
 
         info = await loop.run_in_executor(None, _extract)
     except Exception as e:
-        logger.error(f"Error fetching metadata: {e}")
+        logger.warning(f"Primary extraction failed: {e}. Trying fallback extractor clients...")
         try:
-            await status_msg.edit_text(f"❌ Could not retrieve video from link: {str(e)[:150]}")
-        except Exception:
-            pass
-        return
+            # Fallback 1: Pure yt-dlp default with node/deno JS runtime and no player_client override
+            fallback_opts = dict(fast_opts)
+            fallback_opts.pop("extractor_args", None)
+            def _extract_fallback():
+                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                    return ydl.extract_info(url, download=False)
+
+            info = await loop.run_in_executor(None, _extract_fallback)
+        except Exception as e2:
+            logger.error(f"Fallback extraction also failed: {e2}")
+            err_str = str(e2)
+            help_tip = ""
+            if "Sign in" in err_str or "bot" in err_str.lower() or "player response" in err_str.lower():
+                help_tip = "\n\n💡 Tip: YouTube may be restricting datacenter requests. You can add a `cookies.txt` or set `YOUTUBE_COOKIES` in Render settings to bypass this."
+            try:
+                await status_msg.edit_text(f"❌ Could not retrieve video from link: {err_str[:120]}{help_tip}")
+            except Exception:
+                pass
+            return
 
     try:
         await status_msg.delete()
@@ -426,9 +459,9 @@ async def _execute_video_download(query, context: ContextTypes.DEFAULT_TYPE, ses
         out_template = os.path.join(tmp_dir, "video.%(ext)s")
 
         format_str = (
-            f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<={quality}][ext=mp4]/best"
+            f"bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best"
             if quality != "best" else
-            "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+            "bestvideo+bestaudio/best"
         )
 
         ydl_opts = get_speed_ydl_opts({
@@ -449,6 +482,19 @@ async def _execute_video_download(query, context: ContextTypes.DEFAULT_TYPE, ses
                     return ydl.extract_info(url, download=True)
 
             info = await loop.run_in_executor(None, _download)
+        except Exception as e:
+            logger.warning(f"Primary download failed: {e}. Trying fallback download...")
+            try:
+                fallback_opts = dict(ydl_opts)
+                fallback_opts.pop("extractor_args", None)
+                def _download_fallback():
+                    with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                        return ydl.extract_info(url, download=True)
+                info = await loop.run_in_executor(None, _download_fallback)
+            except Exception as e2:
+                logger.error(f"Fallback download also failed: {e2}")
+                await progress_msg.edit_text(f"❌ Download failed: {str(e2)[:120]}")
+                return
 
             files = [f for f in glob.glob(os.path.join(tmp_dir, "video.*")) if not f.endswith(".temp") and not f.endswith(".part")]
             if not files:
@@ -530,6 +576,19 @@ async def _execute_audio_download(query, context: ContextTypes.DEFAULT_TYPE, ses
                     return ydl.extract_info(url, download=True)
 
             info = await loop.run_in_executor(None, _download_audio)
+        except Exception as e:
+            logger.warning(f"Primary audio download failed: {e}. Trying fallback audio options...")
+            try:
+                fallback_opts = dict(ydl_opts)
+                fallback_opts.pop("extractor_args", None)
+                def _download_audio_fallback():
+                    with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                        return ydl.extract_info(url, download=True)
+                info = await loop.run_in_executor(None, _download_audio_fallback)
+            except Exception as e2:
+                logger.error(f"Fallback audio download also failed: {e2}")
+                await progress_msg.edit_text(f"❌ Audio extraction failed: {str(e2)[:120]}")
+                return
 
             mp3_files = glob.glob(os.path.join(tmp_dir, "*.mp3"))
             if not mp3_files:

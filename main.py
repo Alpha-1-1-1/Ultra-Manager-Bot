@@ -133,8 +133,10 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(downloader_callback_handler, pattern=r"^dl:"))
     app.add_handler(CallbackQueryHandler(menu_callback_handler))
 
-    # AI Feature
+    # AI Feature (Text commands & Photo/Image document captions)
     app.add_handler(CommandHandler("ai", ai_command))
+    app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r"(?i)^/ai(@\w+)?(\s+.*)?$"), ai_command))
+    app.add_handler(MessageHandler(filters.Document.IMAGE & filters.CaptionRegex(r"(?i)^/ai(@\w+)?(\s+.*)?$"), ai_command))
 
     # Video Downloader (yt-dlp) Commands & Auto Link Detector
     app.add_handler(CommandHandler("download", download_video_command))
