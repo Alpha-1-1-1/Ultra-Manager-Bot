@@ -8,31 +8,45 @@ logger = logging.getLogger(__name__)
 _client: Optional[Client] = None
 
 def get_premium_client() -> Optional[Client]:
-    """Initializes and returns the Pyrogram client if credentials exist."""
+    """Initializes and returns the Pyrogram client using session string (Kaggle/Cloud) or local session file."""
     global _client
     if _client is not None:
         return _client
 
     api_id = os.getenv("TELEGRAM_API_ID")
     api_hash = os.getenv("TELEGRAM_API_HASH")
+    session_string = os.getenv("TELEGRAM_SESSION_STRING")
 
     if not api_id or not api_hash:
         return None
 
     try:
         workdir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        session_file = os.path.join(workdir, "premium_uploader.session")
-        if not os.path.exists(session_file):
-            logger.warning("premium_uploader.session not found. Run setup_premium.py first.")
-            return None
 
-        _client = Client(
-            name="premium_uploader",
-            api_id=int(api_id),
-            api_hash=api_hash,
-            workdir=workdir
-        )
-        return _client
+        # Priority 1: Cloud / Kaggle Secret Session String
+        if session_string:
+            _client = Client(
+                name="premium_uploader",
+                api_id=int(api_id),
+                api_hash=api_hash,
+                session_string=session_string,
+                workdir=workdir
+            )
+            return _client
+
+        # Priority 2: Local premium_uploader.session file
+        session_file = os.path.join(workdir, "premium_uploader.session")
+        if os.path.exists(session_file):
+            _client = Client(
+                name="premium_uploader",
+                api_id=int(api_id),
+                api_hash=api_hash,
+                workdir=workdir
+            )
+            return _client
+
+        logger.warning("Neither TELEGRAM_SESSION_STRING nor premium_uploader.session was found.")
+        return None
     except Exception as e:
         logger.error(f"Error initializing Pyrogram client: {e}")
         return None
