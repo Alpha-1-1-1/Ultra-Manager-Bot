@@ -1,6 +1,22 @@
 import logging
 import os
 from dotenv import load_dotenv
+
+# Auto-load Kaggle secrets if running on Kaggle
+try:
+    from kaggle_secrets import UserSecretsClient
+    _user_secrets = UserSecretsClient()
+    for _key in ["TELEGRAM_BOT_TOKEN", "GEMINI_API_KEY", "TELEGRAM_API_ID", "TELEGRAM_API_HASH", "TELEGRAM_SESSION_STRING"]:
+        if not os.getenv(_key):
+            try:
+                _val = _user_secrets.get_secret(_key)
+                if _val:
+                    os.environ[_key] = str(_val).strip()
+            except Exception:
+                pass
+except Exception:
+    pass
+
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -27,7 +43,7 @@ from handlers.music import song_command
 from handlers.crypto import crypto_command
 from handlers.news import news_command
 
-# Load environment variables
+# Load environment variables from .env if present
 load_dotenv()
 
 logging.basicConfig(
@@ -38,7 +54,6 @@ logger = logging.getLogger(__name__)
 
 async def start(update: Update, context) -> None:
     user = update.effective_user
-    # Record user in SQLite database
     log_user(user.id, user.username, user.first_name)
 
     welcome_msg = (
@@ -61,7 +76,7 @@ async def start(update: Update, context) -> None:
 def main() -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token or token == "your_telegram_bot_token_here":
-        print("Error: TELEGRAM_BOT_TOKEN environment variable not properly set in .env")
+        print("Error: TELEGRAM_BOT_TOKEN environment variable not properly set in .env or Kaggle Secrets.")
         return
 
     # Initialize SQLite database

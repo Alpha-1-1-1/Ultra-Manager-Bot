@@ -7,17 +7,34 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# Primary and fallback Gemini models
 CANDIDATE_MODELS = [
     "gemini-3.8-flash",
+    "gemini-2.5-flash",
     "gemini-2.5-pro",
     "gemini-2.0-flash",
 ]
 
 def _get_genai_client():
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = os.getenv("GEMINI_API_KEY", "")
+
+    # Auto-load from Kaggle secrets if running on Kaggle
+    if not api_key or api_key == "your_gemini_api_key_here":
+        try:
+            from kaggle_secrets import UserSecretsClient
+            api_key = UserSecretsClient().get_secret("GEMINI_API_KEY")
+            if api_key:
+                os.environ["GEMINI_API_KEY"] = str(api_key).strip()
+        except Exception:
+            pass
+
+    if not api_key:
+        return None
+
+    # Clean any accidental quotes or whitespace
+    api_key = str(api_key).strip("\"' \n\r\t")
     if not api_key or api_key == "your_gemini_api_key_here":
         return None
+
     try:
         from google import genai
         return genai.Client(api_key=api_key)
@@ -30,7 +47,7 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not client:
         await update.message.reply_text(
             "⚠️ **Gemini AI is not configured.**\n"
-            "Please check that your `GEMINI_API_KEY` in `.env` is correct.\n\n"
+            "Please check that your `GEMINI_API_KEY` is added to `.env` or **Kaggle Secrets**.\n\n"
             "Get a free API key at: https://aistudio.google.com/",
             parse_mode="Markdown"
         )

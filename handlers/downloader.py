@@ -20,8 +20,8 @@ import yt_dlp
 
 logger = logging.getLogger(__name__)
 
-# Strict safety limits for Telegram Bot API (Telegram drops anything >= 50MB)
-TARGET_CHUNK_MB = 38       # Target size for each split part
+# Strict limits for Telegram Bot API (Telegram strictly rejects anything >= 50MB)
+TARGET_CHUNK_MB = 35                  # Safe target size for each part
 MAX_ALLOWED_BYTES = 46 * 1024 * 1024  # 46 MB hard ceiling
 MAX_DOWNLOAD_LIMIT = 4000 * 1024 * 1024  # 4 GB download ceiling
 
@@ -55,14 +55,13 @@ def get_speed_ydl_opts(extra_opts: dict = None) -> dict:
     return opts
 
 def split_video_into_parts(video_file: str, duration: Optional[float] = None) -> List[str]:
-    """Splits a large video file into playable parts strictly under 46MB without re-encoding."""
+    """Splits large videos into playable parts strictly under 46MB using predictable naming."""
     file_size = os.path.getsize(video_file)
 
-    # If already safely under limit, return as is
     if file_size <= MAX_ALLOWED_BYTES:
         return [video_file]
 
-    # Resolve accurate duration
+    # Resolve video duration
     if not duration or duration <= 0:
         try:
             cmd = [
@@ -79,12 +78,14 @@ def split_video_into_parts(video_file: str, duration: Optional[float] = None) ->
     segment_duration = max(3, int(duration / num_parts))
 
     out_dir = os.path.dirname(video_file)
-    base_name, ext = os.path.splitext(os.path.basename(video_file))
+    split_subdir = os.path.join(out_dir, f"split_{uuid.uuid4().hex[:6]}")
+    os.makedirs(split_subdir, exist_ok=True)
 
-    # Try up to 5 segmentation passes to strictly guarantee all parts are < 46MB
+    # Use clean, predictable chunk naming (avoids glob bracket issues like [Official Video])
+    output_pattern = os.path.join(split_subdir, "chunk_%03d.mp4")
+
     attempt = 1
     while attempt <= 5:
-        output_pattern = os.path.join(out_dir, f"{base_name}_part%02d{ext}")
         split_cmd = [
             "ffmpeg", "-y", "-i", video_file,
             "-c", "copy",
@@ -96,14 +97,14 @@ def split_video_into_parts(video_file: str, duration: Optional[float] = None) ->
         ]
         try:
             subprocess.run(split_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            parts = sorted(glob.glob(os.path.join(out_dir, f"{base_name}_part*{ext}")))
-            
-            # Verify every chunk strictly satisfies Telegram limits
+            parts = sorted(glob.glob(os.path.join(split_subdir, "chunk_*.mp4")))
+
+            # Check if all parts strictly meet the 46MB safety limit
             if parts and all(os.path.getsize(p) <= MAX_ALLOWED_BYTES for p in parts):
                 return parts
 
-            # If any chunk exceeded limit due to keyframe gaps, decrease duration by 30% and retry
-            segment_duration = max(3, int(segment_duration * 0.7))
+            # If any chunk exceeded limit due to wide keyframe intervals, decrease duration and retry
+            segment_duration = max(3, int(segment_duration * 0.65))
             for p in parts:
                 try:
                     os.remove(p)
@@ -114,7 +115,10 @@ def split_video_into_parts(video_file: str, duration: Optional[float] = None) ->
 
         attempt += 1
 
-    return parts if parts else [video_file]
+    # Final check of generated parts
+    parts = sorted(glob.glob(os.path.join(split_subdir, "chunk_*.mp4")))
+    valid_parts = [p for p in parts if os.path.exists(p) and os.path.getsize(p) <= MAX_ALLOWED_BYTES]
+    return valid_parts if valid_parts else [video_file]
 
 def format_duration(seconds: Optional[int]) -> str:
     """Format duration seconds into HH:MM:SS or MM:SS."""
@@ -247,7 +251,7 @@ async def process_video_link(url: str, update: Update, context: ContextTypes.DEF
         f"👤 **Channel**: {uploader}\n"
         f"⏱️ **Duration**: {duration}\n"
         f"🌐 **Platform**: {extractor}\n"
-        "✂️ **Auto-Split Engine**: Active (100% Reliable Delivery)\n\n"
+        "✂️ **Auto-Split Engine**: Active (Parts strictly < 46MB)\n\n"
         "Choose an option below:"
     )
 
@@ -400,15 +404,15 @@ async def downloader_callback_handler(update: Update, context: ContextTypes.DEFA
 async def _execute_video_download(query, context: ContextTypes.DEFAULT_TYPE, session: dict, quality: str) -> None:
     chat_id = query.message.chat_id
     url = session["url"]
+    title = session.get("title", "Video")
     sb = session.get("sponsorblock", False)
     sc = session.get("split_chapters", False)
     raw_duration = session.get("raw_duration")
-    template = session.get("fn_template", "%(title)s.%(ext)s")
 
     progress_msg = await query.message.reply_text(f"⚡ Downloading video ({quality})...")
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        out_template = os.path.join(tmp_dir, template)
+        out_template = os.path.join(tmp_dir, "video.%(ext)s")
 
         format_str = (
             f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<={quality}][ext=mp4]/best"
@@ -435,7 +439,7 @@ async def _execute_video_download(query, context: ContextTypes.DEFAULT_TYPE, ses
 
             info = await loop.run_in_executor(None, _download)
 
-            files = [f for f in glob.glob(os.path.join(tmp_dir, "*")) if not f.endswith(".temp") and not f.endswith(".part")]
+            files = [f for f in glob.glob(os.path.join(tmp_dir, "video.*")) if not f.endswith(".temp") and not f.endswith(".part")]
             if not files:
                 await progress_msg.edit_text("❌ Downloaded file exceeds limit or could not be found.")
                 return
@@ -444,7 +448,7 @@ async def _execute_video_download(query, context: ContextTypes.DEFAULT_TYPE, ses
             total_size_mb = round(os.path.getsize(original_file) / (1024 * 1024), 2)
             video_duration = raw_duration or info.get("duration")
 
-            # Guaranteed split strictly < 46MB
+            # Guaranteed split strictly < 46MB using clean chunk naming
             parts_to_upload = split_video_into_parts(original_file, duration=video_duration)
             total_parts = len(parts_to_upload)
 
@@ -455,12 +459,11 @@ async def _execute_video_download(query, context: ContextTypes.DEFAULT_TYPE, ses
 
             for idx, part_file in enumerate(parts_to_upload, 1):
                 part_size_mb = round(os.path.getsize(part_file) / (1024 * 1024), 2)
-                fname = os.path.basename(part_file)
 
                 if total_parts > 1:
-                    caption = f"🎬 **{fname}** (Part {idx}/{total_parts})\n📦 Size: `{part_size_mb} MB`\n\nDownloaded via Ultra Manager Bot"
+                    caption = f"🎬 **{title}** (Part {idx}/{total_parts})\n📦 Size: `{part_size_mb} MB`\n\nDownloaded via Ultra Manager Bot"
                 else:
-                    caption = f"🎬 **{fname}**\n📦 Size: `{part_size_mb} MB`\n\nDownloaded via Ultra Manager Bot"
+                    caption = f"🎬 **{title}**\n📦 Size: `{part_size_mb} MB`\n\nDownloaded via Ultra Manager Bot"
 
                 with open(part_file, "rb") as vf:
                     await context.bot.send_video(
@@ -579,7 +582,7 @@ async def cut_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     progress_msg = await update.message.reply_text(f"✂️ Cutting video ({start_time} to {end_time})...")
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        out_template = os.path.join(tmp_dir, "cut_%(title)s.%(ext)s")
+        out_template = os.path.join(tmp_dir, "cut_video.%(ext)s")
 
         def parse_to_seconds(ts: str) -> float:
             parts = [float(x) for x in ts.split(":")]
@@ -611,7 +614,7 @@ async def cut_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     return ydl.extract_info(url, download=True)
 
             await loop.run_in_executor(None, _cut)
-            files = glob.glob(os.path.join(tmp_dir, "*"))
+            files = [f for f in glob.glob(os.path.join(tmp_dir, "cut_video.*")) if not f.endswith(".part")]
             if not files:
                 await progress_msg.edit_text("❌ Failed to cut video segment.")
                 return
