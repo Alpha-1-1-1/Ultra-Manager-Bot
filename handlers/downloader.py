@@ -5,6 +5,7 @@ import uuid
 import logging
 import asyncio
 import tempfile
+import shutil
 from typing import Dict, Any, Optional
 
 from telegram import (
@@ -14,7 +15,7 @@ from telegram import (
 )
 from telegram.ext import ContextTypes
 import yt_dlp
-from handlers.premium_uploader import upload_premium_file, get_premium_client
+from handlers.premium_uploader import upload_premium_file
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,36 @@ MAX_PREMIUM_FILESIZE = 4000 * 1024 * 1024
 BOT_API_LIMIT = 50 * 1024 * 1024
 
 video_sessions: Dict[str, Dict[str, Any]] = {}
+
+def get_speed_ydl_opts(extra_opts: dict = None) -> dict:
+    """Builds optimized yt-dlp options for maximum parallel download speed."""
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        # Multi-threaded parallel segment downloads (DASH / HLS / YouTube)
+        "concurrent_fragment_downloads": 8,
+        "buffersize": 1024 * 1024,      # 1MB memory buffer
+        "http_chunk_size": 10485760,     # 10MB chunk size
+        "retries": 10,
+        "fragment_retries": 10,
+        # Fast YouTube clients to bypass server-side bitrate throttle
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["web_creator", "android", "mweb"]
+            }
+        },
+    }
+
+    # If aria2c is installed on the system (e.g. on Kaggle / Linux), use 16 multi-threaded connections
+    if shutil.which("aria2c"):
+        opts["external_downloader"] = {"default": "aria2c"}
+        opts["external_downloader_args"] = {
+            "default": ["-x", "16", "-s", "16", "-k", "1M", "--min-split-size=1M"]
+        }
+
+    if extra_opts:
+        opts.update(extra_opts)
+    return opts
 
 def format_duration(seconds: Optional[int]) -> str:
     """Format duration seconds into HH:MM:SS or MM:SS."""
@@ -70,9 +101,10 @@ def get_quality_keyboard(session_id: str) -> InlineKeyboardMarkup:
     quality_buttons = []
     row = []
     # Standard resolution choices
-    for h in [2160, 1440, 1080, 720, 480, 360]:
-        if heights and any(val and val >= h for val in heights):
-            label = f"🌟 4K" if h == 2160 else (f"✨ 2K" if h == 1440 else f"🎥 {h}p")
+    standard_heights = [2160, 1440, 1080, 720, 480, 360]
+    for h in standard_heights:
+        if not heights or any(val and val >= h for val in heights):
+            label = "🌟 4K" if h == 2160 else ("✨ 2K" if h == 1440 else f"🎥 {h}p")
             row.append(InlineKeyboardButton(label, callback_data=f"dl:exec_v:{session_id}:{h}"))
             if len(row) == 2:
                 quality_buttons.append(row)
@@ -99,18 +131,21 @@ def get_quality_keyboard(session_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(quality_buttons)
 
 async def process_video_link(url: str, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    status_msg = await update.message.reply_text("🔍 Extracting video details... Please wait.")
+    """Instant preview card with optimized metadata extraction."""
+    status_msg = await update.message.reply_text("⚡ Fetching video details...")
 
-    ydl_opts = {
+    # Fast metadata options (skip resolving deep streams to render UI immediately)
+    fast_opts = {
         "skip_download": True,
         "quiet": True,
         "no_warnings": True,
+        "extract_flat": False,
     }
 
     loop = asyncio.get_event_loop()
     try:
         def _extract():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with yt_dlp.YoutubeDL(fast_opts) as ydl:
                 return ydl.extract_info(url, download=False)
 
         info = await loop.run_in_executor(None, _extract)
@@ -155,7 +190,7 @@ async def process_video_link(url: str, update: Update, context: ContextTypes.DEF
         f"👤 **Channel**: {uploader}\n"
         f"⏱️ **Duration**: {duration}\n"
         f"🌐 **Platform**: {extractor}\n"
-        f"👑 **Premium Uploads**: Up to 4GB Supported\n\n"
+        f"👑 **Premium 4GB Mode**: Active\n\n"
         "Choose an option below:"
     )
 
@@ -295,13 +330,13 @@ async def downloader_callback_handler(update: Update, context: ContextTypes.DEFA
         return
 
     elif action == "audio":
-        await query.answer("Starting audio extraction...")
+        await query.answer("Starting high-speed audio extraction...")
         await _execute_audio_download(query, context, session)
         return
 
     elif action == "exec_v":
         quality = parts[3] if len(parts) > 3 else "best"
-        await query.answer(f"Starting {quality} video download...")
+        await query.answer(f"Starting parallel {quality} download...")
         await _execute_video_download(query, context, session, quality)
         return
 
@@ -312,7 +347,7 @@ async def _execute_video_download(query, context: ContextTypes.DEFAULT_TYPE, ses
     sc = session.get("split_chapters", False)
     template = session.get("fn_template", "%(title)s.%(ext)s")
 
-    progress_msg = await query.message.reply_text(f"⚡ Downloading video ({quality})... Up to 4GB supported.")
+    progress_msg = await query.message.reply_text(f"🚀 Downloading {quality} via parallel threads... Up to 4GB.")
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         out_template = os.path.join(tmp_dir, template)
@@ -323,13 +358,11 @@ async def _execute_video_download(query, context: ContextTypes.DEFAULT_TYPE, ses
             "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
         )
 
-        ydl_opts = {
+        ydl_opts = get_speed_ydl_opts({
             "format": format_str,
             "outtmpl": out_template,
-            "quiet": True,
-            "no_warnings": True,
-            "max_filesize": MAX_PREMIUM_FILESIZE,  # 4 GB Telegram Premium limit!
-        }
+            "max_filesize": MAX_PREMIUM_FILESIZE,
+        })
 
         if sb:
             ydl_opts["sponsorblock_remove"] = ["all"]
@@ -344,7 +377,6 @@ async def _execute_video_download(query, context: ContextTypes.DEFAULT_TYPE, ses
 
             info = await loop.run_in_executor(None, _download)
 
-            # Locate downloaded video files
             files = [f for f in glob.glob(os.path.join(tmp_dir, "*")) if not f.endswith(".temp") and not f.endswith(".part")]
             if not files:
                 await progress_msg.edit_text("❌ Downloaded file exceeds 4GB limit or could not be found.")
@@ -357,7 +389,6 @@ async def _execute_video_download(query, context: ContextTypes.DEFAULT_TYPE, ses
 
                 caption = f"🎬 **{fname}**\n📦 Size: `{file_size_mb} MB`\n\nDownloaded via Ultra Manager Bot"
 
-                # If file > 50MB, use Telegram Premium MTProto upload
                 if file_size > BOT_API_LIMIT:
                     await progress_msg.edit_text(f"👑 Uploading via Telegram Premium session ({file_size_mb} MB)...")
                     try:
@@ -365,9 +396,7 @@ async def _execute_video_download(query, context: ContextTypes.DEFAULT_TYPE, ses
                         if not success:
                             await progress_msg.edit_text(
                                 f"⚠️ Video is **{file_size_mb} MB** (exceeds the 50MB Bot API cap).\n\n"
-                                "To upload up to 4GB with your Telegram Premium account:\n"
-                                "1. Make sure `TELEGRAM_API_ID` & `TELEGRAM_API_HASH` are in `.env`.\n"
-                                "2. Run `python setup_premium.py` once in your terminal to log in!",
+                                "Please make sure `TELEGRAM_SESSION_STRING` is set in your secrets to allow 4GB uploads!",
                                 parse_mode="Markdown"
                             )
                             return
@@ -406,7 +435,7 @@ async def _execute_audio_download(query, context: ContextTypes.DEFAULT_TYPE, ses
     with tempfile.TemporaryDirectory() as tmp_dir:
         out_template = os.path.join(tmp_dir, "%(title)s.%(ext)s")
 
-        ydl_opts = {
+        ydl_opts = get_speed_ydl_opts({
             "format": "bestaudio/best",
             "outtmpl": out_template,
             "postprocessors": [
@@ -416,10 +445,8 @@ async def _execute_audio_download(query, context: ContextTypes.DEFAULT_TYPE, ses
                     "preferredquality": "192",
                 }
             ],
-            "quiet": True,
-            "no_warnings": True,
             "max_filesize": MAX_PREMIUM_FILESIZE,
-        }
+        })
 
         if sb:
             ydl_opts["sponsorblock_remove"] = ["all"]
@@ -511,15 +538,13 @@ async def cut_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await progress_msg.edit_text("❌ Invalid time format. Use `MM:SS` or `HH:MM:SS`.")
             return
 
-        ydl_opts = {
+        ydl_opts = get_speed_ydl_opts({
             "format": "best[ext=mp4]/best",
             "outtmpl": out_template,
             "download_ranges": yt_dlp.utils.download_range_func(None, [(start_s, end_s)]),
             "force_keyframes_at_cuts": True,
-            "quiet": True,
-            "no_warnings": True,
             "max_filesize": MAX_PREMIUM_FILESIZE,
-        }
+        })
 
         loop = asyncio.get_event_loop()
         try:
