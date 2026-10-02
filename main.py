@@ -1,5 +1,7 @@
 import logging
 import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
 
 # Auto-load Kaggle secrets if running on Kaggle
@@ -16,6 +18,34 @@ try:
                 pass
 except Exception:
     pass
+
+# Load environment variables from .env if present
+load_dotenv()
+
+# Render / Cloud Web Service Health Check Server
+class RenderHealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Ultra Manager Bot is online and running healthy!")
+
+    def log_message(self, format, *args):
+        # Silence HTTP access logs to keep terminal clean
+        pass
+
+def start_render_health_server():
+    """Binds to Render's $PORT to allow deploying on Render's 100% Free Web Service tier."""
+    port_str = os.getenv("PORT")
+    if not port_str:
+        return
+    try:
+        port = int(port_str)
+        server = HTTPServer(("0.0.0.0", port), RenderHealthHandler)
+        logging.info(f"Render health-check server listening on port {port}...")
+        server.serve_forever()
+    except Exception as e:
+        logging.error(f"Failed to start health server: {e}")
 
 from telegram import Update
 from telegram.ext import (
@@ -42,9 +72,6 @@ from handlers.system_monitor import status_command
 from handlers.music import song_command
 from handlers.crypto import crypto_command
 from handlers.news import news_command
-
-# Load environment variables from .env if present
-load_dotenv()
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -76,8 +103,12 @@ async def start(update: Update, context) -> None:
 def main() -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token or token == "your_telegram_bot_token_here":
-        print("Error: TELEGRAM_BOT_TOKEN environment variable not properly set in .env or Kaggle Secrets.")
+        print("Error: TELEGRAM_BOT_TOKEN environment variable not properly set in .env or Cloud Secrets.")
         return
+
+    # Start health server in background thread for Render.com Free Tier support
+    if os.getenv("PORT"):
+        threading.Thread(target=start_render_health_server, daemon=True).start()
 
     # Initialize SQLite database
     init_db()
