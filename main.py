@@ -1,8 +1,17 @@
 import logging
 import os
+import shutil
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
+
+# Ensure ffmpeg/ffprobe binaries are available if missing (e.g. on Render)
+if not shutil.which("ffmpeg"):
+    try:
+        import static_ffmpeg
+        static_ffmpeg.add_paths()
+    except Exception:
+        pass
 
 # Auto-load Kaggle secrets if running on Kaggle
 try:
