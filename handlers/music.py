@@ -42,6 +42,12 @@ async def song_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             ],
             "quiet": True,
             "no_warnings": True,
+            # Bypasses cloud datacenter IP blocks
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android", "ios", "mweb"]
+                }
+            },
         }
 
         loop = asyncio.get_event_loop()
@@ -52,7 +58,6 @@ async def song_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
             info = await loop.run_in_executor(None, _search_and_download)
 
-            # In search mode, entries is a list
             if "entries" in info and info["entries"]:
                 entry = info["entries"][0]
             else:
@@ -75,11 +80,12 @@ async def song_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     audio=af,
                     title=title,
                     performer=artist,
-                    caption=f"🎵 **{title}**\n👤 {artist}\n\nDownloaded via Ultra Manager Bot",
-                    parse_mode="Markdown"
+                    caption=f"🎵 {title}\n👤 {artist}\n\nDownloaded via Ultra Manager Bot",
+                    read_timeout=300,
+                    write_timeout=300,
+                    connect_timeout=60
                 )
 
-            # Log download in database
             log_download(update.effective_user.id, "music", title)
 
             try:
@@ -89,6 +95,6 @@ async def song_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception as e:
             logger.error(f"Song download error: {e}")
             try:
-                await status_msg.edit_text(f"❌ Failed to find or download song: `{str(e)[:150]}`", parse_mode="Markdown")
+                await status_msg.edit_text(f"❌ Failed to find or download song: {str(e)[:150]}")
             except Exception:
                 pass

@@ -1,6 +1,5 @@
 import io
 import os
-import time
 import asyncio
 import logging
 from telegram import Update
@@ -9,8 +8,11 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# Exclusively use modern Gemini 3.8 Flash (no deprecated 2.0 or 2.5 models)
-PRIMARY_MODEL = "gemini-3.8-flash"
+# Active Gemini 3 models (Primary: 3.8 Flash, High-Availability Fallback: 3.6 Flash)
+MODELS_TO_TRY = [
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+]
 
 def _get_genai_client():
     api_key = os.getenv("GEMINI_API_KEY", "")
@@ -28,7 +30,6 @@ def _get_genai_client():
     if not api_key:
         return None
 
-    # Clean any accidental quotes or whitespace
     api_key = str(api_key).strip("\"' \n\r\t")
     if not api_key or api_key == "your_gemini_api_key_here":
         return None
@@ -45,7 +46,7 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not client:
         await update.message.reply_text(
             "⚠️ **Gemini AI is not configured.**\n"
-            "Please check that your `GEMINI_API_KEY` is added to `.env` or **Kaggle Secrets**.\n\n"
+            "Please check that your `GEMINI_API_KEY` is added to `.env` or Render Environment Variables.\n\n"
             "Get a free API key at: https://aistudio.google.com/",
             parse_mode="Markdown"
         )
@@ -84,24 +85,30 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     contents = [image, prompt or "Describe this image in detail."] if image else prompt
 
-    # Call Gemini 3.8 Flash with automatic retry on transient spikes
+    # Try gemini-3.8-flash first; if Google returns 503 high demand, failover to gemini-3.6-flash seamlessly
     last_error = None
-    for attempt in range(1, 3):
-        try:
-            response = client.models.generate_content(
-                model=PRIMARY_MODEL,
-                contents=contents
-            )
-            if response and response.text:
-                await status_msg.edit_text(response.text)
-                return
-        except Exception as e:
-            last_error = str(e)
-            logger.warning(f"Gemini 3.8 Flash attempt {attempt} failed: {e}")
-            if attempt == 1:
-                await asyncio.sleep(1.5)
+    for model_name in MODELS_TO_TRY:
+        for attempt in range(1, 3):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=contents
+                )
+                if response and response.text:
+                    await status_msg.edit_text(response.text)
+                    return
+            except Exception as e:
+                err_str = str(e)
+                last_error = err_str
+                logger.warning(f"Model {model_name} attempt {attempt} error: {e}")
+                # If 503 high demand, wait a moment and retry or proceed to next Gemini 3 model
+                if "503" in err_str or "UNAVAILABLE" in err_str:
+                    await asyncio.sleep(1.0)
+                    continue
+                else:
+                    break
 
     await status_msg.edit_text(
-        f"❌ Error communicating with Gemini 3.8 Flash:\n`{last_error}`",
+        f"❌ Error communicating with Gemini AI:\n`{last_error}`",
         parse_mode="Markdown"
     )

@@ -29,7 +29,7 @@ MAX_DOWNLOAD_LIMIT = 4000 * 1024 * 1024  # 4 GB download ceiling
 video_sessions: Dict[str, Dict[str, Any]] = {}
 
 def get_speed_ydl_opts(extra_opts: dict = None) -> dict:
-    """Builds optimized yt-dlp options for maximum parallel download speed."""
+    """Builds optimized yt-dlp options for maximum parallel download speed and cloud datacenter bypass."""
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -38,9 +38,10 @@ def get_speed_ydl_opts(extra_opts: dict = None) -> dict:
         "http_chunk_size": 10485760,
         "retries": 10,
         "fragment_retries": 10,
+        # Bypasses Render/AWS/GCP datacenter IP blocking by using Android/iOS mobile APIs
         "extractor_args": {
             "youtube": {
-                "player_client": ["web_creator", "android", "mweb"]
+                "player_client": ["android", "ios", "mweb"]
             }
         },
     }
@@ -193,12 +194,11 @@ def get_quality_keyboard(session_id: str) -> InlineKeyboardMarkup:
 async def process_video_link(url: str, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     status_msg = await update.message.reply_text("⚡ Fetching video details...")
 
-    fast_opts = {
+    # Use datacenter-compatible android/ios clients
+    fast_opts = get_speed_ydl_opts({
         "skip_download": True,
-        "quiet": True,
-        "no_warnings": True,
         "extract_flat": False,
-    }
+    })
 
     loop = asyncio.get_event_loop()
     try:
@@ -245,7 +245,6 @@ async def process_video_link(url: str, update: Update, context: ContextTypes.DEF
         "fn_template": "%(title)s.%(ext)s",
     }
 
-    # Use HTML escaping so special characters like _, *, [ ], ( ) never crash Telegram's parser
     escaped_title = html.escape(title)
     escaped_uploader = html.escape(uploader)
     escaped_extractor = html.escape(extractor)
@@ -261,7 +260,6 @@ async def process_video_link(url: str, update: Update, context: ContextTypes.DEF
 
     keyboard = get_main_options_keyboard(session_id)
 
-    # Attempt to send photo with HTML caption
     sent_thumbnail = False
     if thumbnail_url:
         try:
@@ -276,7 +274,6 @@ async def process_video_link(url: str, update: Update, context: ContextTypes.DEF
         except Exception as e:
             logger.warning(f"send_photo with URL failed ({e}), falling back to text message...")
 
-    # Fallback to text message if thumbnail couldn't be sent directly
     if not sent_thumbnail:
         try:
             await update.message.reply_text(
@@ -285,8 +282,6 @@ async def process_video_link(url: str, update: Update, context: ContextTypes.DEF
                 parse_mode="HTML"
             )
         except Exception as e:
-            # Absolute fallback with plain text
-            logger.error(f"Failed to send HTML message ({e}), falling back to plain text...")
             plain_caption = f"🎬 {title}\n\n👤 Channel: {uploader}\n⏱️ Duration: {duration}\n🌐 Platform: {extractor}\n\nChoose an option below:"
             await update.message.reply_text(
                 text=plain_caption,
