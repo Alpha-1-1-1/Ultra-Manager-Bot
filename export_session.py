@@ -10,13 +10,13 @@ API_HASH = os.getenv("TELEGRAM_API_HASH")
 
 async def main():
     if not API_ID or not API_HASH:
-        print("❌ Error: Missing TELEGRAM_API_ID or TELEGRAM_API_HASH in .env")
+        print("Error: Missing TELEGRAM_API_ID or TELEGRAM_API_HASH in .env")
         return
 
     workdir = os.path.dirname(os.path.abspath(__file__))
     session_file = os.path.join(workdir, "premium_uploader.session")
     if not os.path.exists(session_file):
-        print("❌ Error: premium_uploader.session not found. Run setup_premium.py first to log in.")
+        print("Error: premium_uploader.session not found. Run setup_premium.py first to log in.")
         return
 
     app = Client(
@@ -31,7 +31,7 @@ async def main():
     await app.stop()
 
     print("\n" + "=" * 60)
-    print("🔑 YOUR TELEGRAM_SESSION_STRING (FOR KAGGLE SECRETS):")
+    print("YOUR TELEGRAM_SESSION_STRING (FOR KAGGLE SECRETS):")
     print("=" * 60)
     print(session_str)
     print("=" * 60)
