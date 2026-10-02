@@ -1,12 +1,14 @@
 import os
 import re
 import glob
+import math
 import uuid
 import logging
 import asyncio
 import tempfile
 import shutil
-from typing import Dict, Any, Optional
+import subprocess
+from typing import Dict, Any, Optional, List
 
 from telegram import (
     Update,
@@ -15,13 +17,12 @@ from telegram import (
 )
 from telegram.ext import ContextTypes
 import yt_dlp
-from handlers.premium_uploader import upload_premium_file
 
 logger = logging.getLogger(__name__)
 
-# 4GB limit for Telegram Premium
-MAX_PREMIUM_FILESIZE = 4000 * 1024 * 1024
-BOT_API_LIMIT = 50 * 1024 * 1024
+# Standard Telegram Bot upload limit (safe buffer at 46 MB)
+SAFE_CHUNK_MB = int(os.getenv("MAX_CHUNK_MB", "46"))
+MAX_DOWNLOAD_LIMIT = 4000 * 1024 * 1024  # 4 GB download ceiling
 
 video_sessions: Dict[str, Dict[str, Any]] = {}
 
@@ -30,13 +31,11 @@ def get_speed_ydl_opts(extra_opts: dict = None) -> dict:
     opts = {
         "quiet": True,
         "no_warnings": True,
-        # Multi-threaded parallel segment downloads (DASH / HLS / YouTube)
         "concurrent_fragment_downloads": 8,
-        "buffersize": 1024 * 1024,      # 1MB memory buffer
-        "http_chunk_size": 10485760,     # 10MB chunk size
+        "buffersize": 1024 * 1024,
+        "http_chunk_size": 10485760,
         "retries": 10,
         "fragment_retries": 10,
-        # Fast YouTube clients to bypass server-side bitrate throttle
         "extractor_args": {
             "youtube": {
                 "player_client": ["web_creator", "android", "mweb"]
@@ -44,7 +43,6 @@ def get_speed_ydl_opts(extra_opts: dict = None) -> dict:
         },
     }
 
-    # If aria2c is installed on the system (e.g. on Kaggle / Linux), use 16 multi-threaded connections
     if shutil.which("aria2c"):
         opts["external_downloader"] = {"default": "aria2c"}
         opts["external_downloader_args"] = {
@@ -54,6 +52,50 @@ def get_speed_ydl_opts(extra_opts: dict = None) -> dict:
     if extra_opts:
         opts.update(extra_opts)
     return opts
+
+def split_video_into_parts(video_file: str, max_chunk_mb: int = SAFE_CHUNK_MB) -> List[str]:
+    """Splits a large video file into playable parts without re-encoding (stream copy)."""
+    file_size = os.path.getsize(video_file)
+    max_bytes = max_chunk_mb * 1024 * 1024
+
+    if file_size <= max_bytes:
+        return [video_file]
+
+    total_duration = None
+    try:
+        cmd = [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", video_file
+        ]
+        out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL).strip()
+        total_duration = float(out)
+    except Exception:
+        total_duration = 3600.0
+
+    num_parts = math.ceil(file_size / max_bytes)
+    segment_duration = max(5, int((total_duration / num_parts) * 0.95))
+
+    out_dir = os.path.dirname(video_file)
+    base_name, ext = os.path.splitext(os.path.basename(video_file))
+    output_pattern = os.path.join(out_dir, f"{base_name}_part%02d{ext}")
+
+    split_cmd = [
+        "ffmpeg", "-y", "-i", video_file,
+        "-c", "copy",
+        "-map", "0",
+        "-segment_time", str(segment_duration),
+        "-f", "segment",
+        "-reset_timestamps", "1",
+        output_pattern
+    ]
+
+    try:
+        subprocess.run(split_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        parts = sorted(glob.glob(os.path.join(out_dir, f"{base_name}_part*{ext}")))
+        return parts if parts else [video_file]
+    except Exception as e:
+        logger.error(f"Error splitting video: {e}")
+        return [video_file]
 
 def format_duration(seconds: Optional[int]) -> str:
     """Format duration seconds into HH:MM:SS or MM:SS."""
@@ -112,9 +154,9 @@ def get_quality_keyboard(session_id: str) -> InlineKeyboardMarkup:
     if row:
         quality_buttons.append(row)
 
-    # Full 4GB Best Quality
+    # Full Best Quality (Auto-split enabled)
     quality_buttons.append([
-        InlineKeyboardButton("⚡ Best Quality (Up to 4GB Premium)", callback_data=f"dl:exec_v:{session_id}:best")
+        InlineKeyboardButton("⚡ Best Quality (Full HD/4K Auto-Split)", callback_data=f"dl:exec_v:{session_id}:best")
     ])
 
     # SponsorBlock and Chapters toggle row
@@ -131,10 +173,8 @@ def get_quality_keyboard(session_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(quality_buttons)
 
 async def process_video_link(url: str, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Instant preview card with optimized metadata extraction."""
     status_msg = await update.message.reply_text("⚡ Fetching video details...")
 
-    # Fast metadata options (skip resolving deep streams to render UI immediately)
     fast_opts = {
         "skip_download": True,
         "quiet": True,
@@ -190,7 +230,7 @@ async def process_video_link(url: str, update: Update, context: ContextTypes.DEF
         f"👤 **Channel**: {uploader}\n"
         f"⏱️ **Duration**: {duration}\n"
         f"🌐 **Platform**: {extractor}\n"
-        f"👑 **Premium 4GB Mode**: Active\n\n"
+        "✂️ **Auto-Split Mode**: Active (No file size limits!)\n\n"
         "Choose an option below:"
     )
 
@@ -330,13 +370,13 @@ async def downloader_callback_handler(update: Update, context: ContextTypes.DEFA
         return
 
     elif action == "audio":
-        await query.answer("Starting high-speed audio extraction...")
+        await query.answer("Starting audio extraction...")
         await _execute_audio_download(query, context, session)
         return
 
     elif action == "exec_v":
         quality = parts[3] if len(parts) > 3 else "best"
-        await query.answer(f"Starting parallel {quality} download...")
+        await query.answer(f"Starting {quality} video download...")
         await _execute_video_download(query, context, session, quality)
         return
 
@@ -347,7 +387,7 @@ async def _execute_video_download(query, context: ContextTypes.DEFAULT_TYPE, ses
     sc = session.get("split_chapters", False)
     template = session.get("fn_template", "%(title)s.%(ext)s")
 
-    progress_msg = await query.message.reply_text(f"🚀 Downloading {quality} via parallel threads... Up to 4GB.")
+    progress_msg = await query.message.reply_text(f"⚡ Downloading video ({quality})...")
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         out_template = os.path.join(tmp_dir, template)
@@ -361,7 +401,7 @@ async def _execute_video_download(query, context: ContextTypes.DEFAULT_TYPE, ses
         ydl_opts = get_speed_ydl_opts({
             "format": format_str,
             "outtmpl": out_template,
-            "max_filesize": MAX_PREMIUM_FILESIZE,
+            "max_filesize": MAX_DOWNLOAD_LIMIT,
         })
 
         if sb:
@@ -382,37 +422,34 @@ async def _execute_video_download(query, context: ContextTypes.DEFAULT_TYPE, ses
                 await progress_msg.edit_text("❌ Downloaded file exceeds 4GB limit or could not be found.")
                 return
 
-            for video_file in files:
-                file_size = os.path.getsize(video_file)
-                file_size_mb = round(file_size / (1024 * 1024), 2)
-                fname = os.path.basename(video_file)
+            original_file = files[0]
+            total_size_mb = round(os.path.getsize(original_file) / (1024 * 1024), 2)
 
-                caption = f"🎬 **{fname}**\n📦 Size: `{file_size_mb} MB`\n\nDownloaded via Ultra Manager Bot"
+            # Check if video needs splitting to fit under Telegram Bot upload limits
+            parts_to_upload = split_video_into_parts(original_file, max_chunk_mb=SAFE_CHUNK_MB)
+            total_parts = len(parts_to_upload)
 
-                if file_size > BOT_API_LIMIT:
-                    await progress_msg.edit_text(f"👑 Uploading via Telegram Premium session ({file_size_mb} MB)...")
-                    try:
-                        success = await upload_premium_file(chat_id, video_file, caption, media_type="video")
-                        if not success:
-                            await progress_msg.edit_text(
-                                f"⚠️ Video is **{file_size_mb} MB** (exceeds the 50MB Bot API cap).\n\n"
-                                "Please make sure `TELEGRAM_SESSION_STRING` is set in your secrets to allow 4GB uploads!",
-                                parse_mode="Markdown"
-                            )
-                            return
-                    except Exception as pe:
-                        logger.error(f"Premium upload failed: {pe}")
-                        await progress_msg.edit_text(f"❌ Premium upload failed: `{str(pe)[:150]}`")
-                        return
+            if total_parts > 1:
+                await progress_msg.edit_text(f"✂️ File size is `{total_size_mb} MB`. Splitting into {total_parts} parts for upload...")
+            else:
+                await progress_msg.edit_text(f"📤 Uploading video to Telegram (`{total_size_mb} MB`)...")
+
+            for idx, part_file in enumerate(parts_to_upload, 1):
+                part_size_mb = round(os.path.getsize(part_file) / (1024 * 1024), 2)
+                fname = os.path.basename(part_file)
+
+                if total_parts > 1:
+                    caption = f"🎬 **{fname}** (Part {idx}/{total_parts})\n📦 Size: `{part_size_mb} MB`\n\nDownloaded via Ultra Manager Bot"
                 else:
-                    await progress_msg.edit_text(f"📤 Uploading video to Telegram ({file_size_mb} MB)...")
-                    with open(video_file, "rb") as vf:
-                        await context.bot.send_video(
-                            chat_id=chat_id,
-                            video=vf,
-                            caption=caption,
-                            parse_mode="Markdown"
-                        )
+                    caption = f"🎬 **{fname}**\n📦 Size: `{part_size_mb} MB`\n\nDownloaded via Ultra Manager Bot"
+
+                with open(part_file, "rb") as vf:
+                    await context.bot.send_video(
+                        chat_id=chat_id,
+                        video=vf,
+                        caption=caption,
+                        parse_mode="Markdown"
+                    )
 
             try:
                 await progress_msg.delete()
@@ -445,7 +482,7 @@ async def _execute_audio_download(query, context: ContextTypes.DEFAULT_TYPE, ses
                     "preferredquality": "192",
                 }
             ],
-            "max_filesize": MAX_PREMIUM_FILESIZE,
+            "max_filesize": MAX_DOWNLOAD_LIMIT,
         })
 
         if sb:
@@ -472,20 +509,16 @@ async def _execute_audio_download(query, context: ContextTypes.DEFAULT_TYPE, ses
 
             caption = f"🎵 **{title}**\n👤 {uploader}\n📦 Size: `{file_size_mb} MB`\n\nExtracted via Ultra Manager Bot"
 
-            if file_size > BOT_API_LIMIT:
-                await progress_msg.edit_text(f"👑 Uploading audio via Telegram Premium ({file_size_mb} MB)...")
-                await upload_premium_file(chat_id, audio_file, caption, media_type="audio")
-            else:
-                await progress_msg.edit_text("📤 Uploading audio to Telegram...")
-                with open(audio_file, "rb") as af:
-                    await context.bot.send_audio(
-                        chat_id=chat_id,
-                        audio=af,
-                        title=title,
-                        performer=uploader,
-                        caption=caption,
-                        parse_mode="Markdown"
-                    )
+            await progress_msg.edit_text("📤 Uploading audio to Telegram...")
+            with open(audio_file, "rb") as af:
+                await context.bot.send_audio(
+                    chat_id=chat_id,
+                    audio=af,
+                    title=title,
+                    performer=uploader,
+                    caption=caption,
+                    parse_mode="Markdown"
+                )
 
             try:
                 await progress_msg.delete()
@@ -543,7 +576,7 @@ async def cut_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "outtmpl": out_template,
             "download_ranges": yt_dlp.utils.download_range_func(None, [(start_s, end_s)]),
             "force_keyframes_at_cuts": True,
-            "max_filesize": MAX_PREMIUM_FILESIZE,
+            "max_filesize": MAX_DOWNLOAD_LIMIT,
         })
 
         loop = asyncio.get_event_loop()
@@ -563,12 +596,9 @@ async def cut_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             file_size_mb = round(file_size / (1024 * 1024), 2)
             caption = f"✂️ **Cut Segment**: {start_time} - {end_time}\n📦 Size: `{file_size_mb} MB`\n\nVia Ultra Manager Bot"
 
-            if file_size > BOT_API_LIMIT:
-                await progress_msg.edit_text(f"👑 Uploading cut video via Telegram Premium ({file_size_mb} MB)...")
-                await upload_premium_file(update.effective_chat.id, video_file, caption, media_type="video")
-            else:
-                await progress_msg.edit_text("📤 Uploading cut segment...")
-                with open(video_file, "rb") as vf:
+            parts_to_upload = split_video_into_parts(video_file, max_chunk_mb=SAFE_CHUNK_MB)
+            for part in parts_to_upload:
+                with open(part, "rb") as vf:
                     await context.bot.send_video(
                         chat_id=update.effective_chat.id,
                         video=vf,
