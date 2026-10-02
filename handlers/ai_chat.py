@@ -9,10 +9,10 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# Active Gemini 3 models (Primary: 3.6 Flash for instant responses without 503 spikes, High-Capacity: 3.8 Flash)
+# Active Gemini 3 models (Primary: 3.8 Flash, Fallback: 3.6 Flash)
 MODELS_TO_TRY = [
-    "gemini-3.6-flash",
     "gemini-3.8-flash",
+    "gemini-3.6-flash",
 ]
 
 def _get_genai_client():

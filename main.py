@@ -5,6 +5,10 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
 
+import urllib.request
+import zipfile
+import platform
+
 # Ensure ffmpeg/ffprobe binaries are available if missing (e.g. on Render)
 if not shutil.which("ffmpeg"):
     try:
@@ -12,6 +16,26 @@ if not shutil.which("ffmpeg"):
         static_ffmpeg.add_paths()
     except Exception:
         pass
+
+# Auto-install Deno for yt-dlp JS challenge solver (if missing)
+if not shutil.which("node") and not shutil.which("deno") and platform.system() == "Linux":
+    try:
+        deno_dir = os.path.join(os.getcwd(), ".deno")
+        os.makedirs(deno_dir, exist_ok=True)
+        deno_exe = os.path.join(deno_dir, "deno")
+        if not os.path.exists(deno_exe):
+            print("Downloading Deno for yt-dlp JavaScript challenge solver...")
+            url = "https://github.com/denoland/deno/releases/download/v2.1.4/deno-x86_64-unknown-linux-gnu.zip"
+            zip_path = os.path.join(deno_dir, "deno.zip")
+            urllib.request.urlretrieve(url, zip_path)
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(deno_dir)
+            os.chmod(deno_exe, 0o777)
+            os.remove(zip_path)
+        os.environ["PATH"] = f"{deno_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+        print("Deno installed successfully for JS challenges.")
+    except Exception as e:
+        print(f"Failed to auto-install Deno: {e}")
 
 # Auto-load Kaggle secrets if running on Kaggle
 try:
