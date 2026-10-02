@@ -496,6 +496,8 @@ async def _execute_video_download(query, context: ContextTypes.DEFAULT_TYPE, ses
                 await progress_msg.edit_text(f"❌ Download failed: {str(e2)[:120]}")
                 return
 
+        # --- File finding, splitting, and uploading (runs after ANY successful download) ---
+        try:
             files = [f for f in glob.glob(os.path.join(tmp_dir, "video.*")) if not f.endswith(".temp") and not f.endswith(".part")]
             if not files:
                 await progress_msg.edit_text("❌ Downloaded file exceeds limit or could not be found.")
@@ -590,6 +592,8 @@ async def _execute_audio_download(query, context: ContextTypes.DEFAULT_TYPE, ses
                 await progress_msg.edit_text(f"❌ Audio extraction failed: {str(e2)[:120]}")
                 return
 
+        # --- File finding and uploading (runs after ANY successful download) ---
+        try:
             mp3_files = glob.glob(os.path.join(tmp_dir, "*.mp3"))
             if not mp3_files:
                 await progress_msg.edit_text("❌ Failed to find converted MP3 file.")
