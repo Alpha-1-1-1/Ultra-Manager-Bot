@@ -63,6 +63,19 @@ def get_speed_ydl_opts(extra_opts: dict = None) -> dict:
         except Exception:
             pass
 
+    # Randomly select a working proxy if the file exists
+    try:
+        import random
+        proxy_file = "working_proxies.txt"
+        if os.path.exists(proxy_file):
+            with open(proxy_file, "r", encoding="utf-8") as f:
+                proxies = [line.strip() for line in f if line.strip()]
+            if proxies:
+                opts["proxy"] = random.choice(proxies)
+                logger.info(f"Using proxy: {opts['proxy']}")
+    except Exception as e:
+        logger.error(f"Error loading proxy: {e}")
+
     if shutil.which("aria2c"):
         opts["external_downloader"] = {"default": "aria2c"}
         opts["external_downloader_args"] = {
