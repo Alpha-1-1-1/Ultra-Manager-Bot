@@ -157,7 +157,8 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     for model_name in MODELS_TO_TRY:
         for attempt in range(1, 3):
             try:
-                response = client.models.generate_content(
+                response = await asyncio.to_thread(
+                    client.models.generate_content,
                     model=model_name,
                     contents=contents
                 )
