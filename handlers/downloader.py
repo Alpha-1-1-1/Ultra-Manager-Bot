@@ -28,7 +28,7 @@ MAX_DOWNLOAD_LIMIT = 4000 * 1024 * 1024  # 4 GB download ceiling
 
 video_sessions: Dict[str, Dict[str, Any]] = {}
 
-def get_speed_ydl_opts(extra_opts: dict = None) -> dict:
+def get_speed_ydl_opts(url: str = None, extra_opts: dict = None) -> dict:
     """Builds optimized yt-dlp options for maximum speed, JS challenge solving, and cloud datacenter bypass."""
     opts = {
         "quiet": True,
@@ -50,31 +50,37 @@ def get_speed_ydl_opts(extra_opts: dict = None) -> dict:
         },
     }
 
-    # Automatically load YouTube cookies if present (bypasses datacenter bot checks)
-    cookie_file = os.getenv("YOUTUBE_COOKIES_FILE", "cookies.txt")
-    if os.path.exists(cookie_file) and os.path.getsize(cookie_file) > 0:
-        opts["cookiefile"] = cookie_file
-    elif os.getenv("YOUTUBE_COOKIES"):
-        try:
-            temp_cookie_path = os.path.join(tempfile.gettempdir(), "render_yt_cookies.txt")
-            with open(temp_cookie_path, "w", encoding="utf-8") as f:
-                f.write(os.getenv("YOUTUBE_COOKIES"))
-            opts["cookiefile"] = temp_cookie_path
-        except Exception:
-            pass
+    is_youtube = False
+    if url and ("youtube.com" in url or "youtu.be" in url):
+        is_youtube = True
 
-    # Randomly select a working proxy if the file exists
-    try:
-        import random
-        proxy_file = "working_proxies.txt"
-        if os.path.exists(proxy_file):
-            with open(proxy_file, "r", encoding="utf-8") as f:
-                proxies = [line.strip() for line in f if line.strip()]
-            if proxies:
-                opts["proxy"] = random.choice(proxies)
-                logger.info(f"Using proxy: {opts['proxy']}")
-    except Exception as e:
-        logger.error(f"Error loading proxy: {e}")
+    # Automatically load YouTube cookies if present (bypasses datacenter bot checks)
+    if is_youtube:
+        cookie_file = os.getenv("YOUTUBE_COOKIES_FILE", "cookies.txt")
+        if os.path.exists(cookie_file) and os.path.getsize(cookie_file) > 0:
+            opts["cookiefile"] = cookie_file
+        elif os.getenv("YOUTUBE_COOKIES"):
+            try:
+                temp_cookie_path = os.path.join(tempfile.gettempdir(), "render_yt_cookies.txt")
+                with open(temp_cookie_path, "w", encoding="utf-8") as f:
+                    f.write(os.getenv("YOUTUBE_COOKIES"))
+                opts["cookiefile"] = temp_cookie_path
+            except Exception:
+                pass
+
+        # Randomly select a working proxy if the file exists
+        try:
+            import random
+            proxy_file = "working_proxies.txt"
+            if os.path.exists(proxy_file):
+                with open(proxy_file, "r", encoding="utf-8") as f:
+                    proxies = [line.strip() for line in f if line.strip()]
+                if proxies:
+                    opts["proxy"] = random.choice(proxies)
+                    logger.info(f"Using proxy: {opts['proxy']}")
+        except Exception as e:
+            logger.error(f"Error loading proxy: {e}")
+
 
     if shutil.which("aria2c"):
         opts["external_downloader"] = {"default": "aria2c"}
@@ -225,7 +231,7 @@ async def process_video_link(url: str, update: Update, context: ContextTypes.DEF
     status_msg = await update.message.reply_text("⚡ Fetching video details...")
 
     # Use datacenter-compatible android/ios clients
-    fast_opts = get_speed_ydl_opts({
+    fast_opts = get_speed_ydl_opts(url, {
         "skip_download": True,
         "extract_flat": False,
     })
@@ -477,7 +483,7 @@ async def _execute_video_download(query, context: ContextTypes.DEFAULT_TYPE, ses
             "bestvideo+bestaudio/best"
         )
 
-        ydl_opts = get_speed_ydl_opts({
+        ydl_opts = get_speed_ydl_opts(url, {
             "format": format_str,
             "outtmpl": out_template,
             "max_filesize": MAX_DOWNLOAD_LIMIT,
@@ -568,7 +574,7 @@ async def _execute_audio_download(query, context: ContextTypes.DEFAULT_TYPE, ses
     with tempfile.TemporaryDirectory() as tmp_dir:
         out_template = os.path.join(tmp_dir, "%(title)s.%(ext)s")
 
-        ydl_opts = get_speed_ydl_opts({
+        ydl_opts = get_speed_ydl_opts(url, {
             "format": "bestaudio/best",
             "outtmpl": out_template,
             "postprocessors": [
@@ -684,7 +690,7 @@ async def cut_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await progress_msg.edit_text("❌ Invalid time format. Use `MM:SS` or `HH:MM:SS`.")
             return
 
-        ydl_opts = get_speed_ydl_opts({
+        ydl_opts = get_speed_ydl_opts(url, {
             "format": "best[ext=mp4]/best",
             "outtmpl": out_template,
             "download_ranges": yt_dlp.utils.download_range_func(None, [(start_s, end_s)]),
