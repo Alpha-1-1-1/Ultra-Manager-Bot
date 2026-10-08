@@ -12,9 +12,8 @@ logger = logging.getLogger(__name__)
 # Active Gemini 3 models (Primary: 3.8 Flash, Fallback: 3.6 Flash)
 MODELS_TO_TRY = [
     "gemini-3.8-flash",
-    "gemini-3.6-flash",
-    "gemini-2.5-flash",
-    "gemini-1.5-flash",
+    "models/gemini-3.8-flash",
+    "gemini-1.5-flash-latest",
 ]
 
 def _get_genai_client():
@@ -153,7 +152,7 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     contents = [image, final_prompt] if image else final_prompt
 
     # Query Gemini with fallback models
-    last_error = None
+    errors = []
     import time
     
     # 1. First, attempt predefined models with streaming
@@ -188,7 +187,7 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                     return
             except Exception as e:
                 err_str = str(e)
-                last_error = err_str
+                errors.append(f"• `{model_name}` (Attempt {attempt}): {err_str}")
                 logger.warning(f"Model {model_name} attempt {attempt} error: {e}")
                 if "503" in err_str or "UNAVAILABLE" in err_str:
                     await asyncio.sleep(1.0)
@@ -196,54 +195,8 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 else:
                     break # Break attempt loop, try next model
 
-    # 2. If predefined models fail (e.g. 404), dynamically find a valid model
-    try:
-        available_models = []
-        models_pager = await client.aio.models.list()
-        for m in models_pager:
-            if "generateContent" in getattr(m, 'supported_actions', []) or getattr(m, 'name', ''):
-                available_models.append(m.name)
-        
-        flash_models = [m for m in available_models if "flash" in m.lower()]
-        best_model = flash_models[0] if flash_models else (available_models[0] if available_models else None)
-        
-        if best_model:
-            full_response = ""
-            last_edit_time = time.time()
-            
-            response_stream = await client.aio.models.generate_content_stream(
-                model=best_model,
-                contents=contents
-            )
-            
-            async for chunk in response_stream:
-                if chunk.text:
-                    full_response += chunk.text
-                    if time.time() - last_edit_time > 1.5:
-                        preview = full_response[:3900]
-                        try:
-                            await status_msg.edit_text(preview + " ⏳", parse_mode="Markdown")
-                        except Exception:
-                            try:
-                                await status_msg.edit_text(preview + " ⏳")
-                            except Exception:
-                                pass
-                        last_edit_time = time.time()
-                        
-            if full_response:
-                await _send_long_response(status_msg, update, full_response)
-                return
-                
-        # If even dynamic fallback fails, show the list
-        model_list_str = ", ".join(flash_models[:5]) if flash_models else "None found"
-        await status_msg.edit_text(
-            f"❌ **All predefined models failed.**\n\n"
-            f"Dynamic check found these 'flash' models available for your API Key:\n`{model_list_str}`\n\n"
-            f"Last Error: `{last_error}`",
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        await status_msg.edit_text(
-            f"❌ **Error communicating with Gemini AI**:\n`{last_error}`\n\n(Fallback model discovery also failed: {e})",
-            parse_mode="Markdown"
-        )
+    error_report = "\n".join(errors)
+    await status_msg.edit_text(
+        f"❌ **Error communicating with Google's Gemini API**:\n\n{error_report}",
+        parse_mode="Markdown"
+    )
