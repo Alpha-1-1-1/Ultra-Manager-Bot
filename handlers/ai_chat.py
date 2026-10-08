@@ -175,7 +175,37 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 else:
                     break
 
-    await status_msg.edit_text(
-        f"❌ **Error communicating with Gemini AI**:\n`{last_error}`",
-        parse_mode="Markdown"
-    )
+    # If predefined models fail, try to dynamically find a working model
+    try:
+        available_models = []
+        # Attempt to fetch list of models
+        for m in client.models.list():
+            if "generateContent" in getattr(m, 'supported_actions', []) or getattr(m, 'name', ''):
+                available_models.append(m.name)
+        
+        flash_models = [m for m in available_models if "flash" in m.lower()]
+        best_model = flash_models[0] if flash_models else (available_models[0] if available_models else None)
+        
+        if best_model:
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model=best_model,
+                contents=contents
+            )
+            if response and response.text:
+                await _send_long_response(status_msg, update, response.text)
+                return
+                
+        # If even dynamic fallback fails, show the list
+        model_list_str = ", ".join(flash_models[:5]) if flash_models else "None found"
+        await status_msg.edit_text(
+            f"❌ **All predefined models failed.**\n\n"
+            f"Dynamic check found these 'flash' models available for your API Key:\n`{model_list_str}`\n\n"
+            f"Last Error: `{last_error}`",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await status_msg.edit_text(
+            f"❌ **Error communicating with Gemini AI**:\n`{last_error}`\n\n(Fallback model discovery also failed: {e})",
+            parse_mode="Markdown"
+        )
