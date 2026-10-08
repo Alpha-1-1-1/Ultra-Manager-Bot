@@ -147,7 +147,7 @@ def main() -> None:
     init_db()
 
     # Build Application with JobQueue enabled
-    app = ApplicationBuilder().token(token).build()
+    app = ApplicationBuilder().token(token).concurrent_updates(True).build()
 
     # Base commands
     app.add_handler(CommandHandler("start", start))
@@ -189,7 +189,7 @@ def main() -> None:
     # File Tools Feature
     app.add_handler(CommandHandler("convert", convert_image_command))
 
-    print("🚀 Ultra Manager Bot is running with all features active...")
+    print("Ultra Manager Bot is running with all features active...")
     app.run_polling()
 
 if __name__ == "__main__":

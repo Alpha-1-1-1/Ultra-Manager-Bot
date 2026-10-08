@@ -13,7 +13,9 @@ logger = logging.getLogger(__name__)
 MODELS_TO_TRY = [
     "gemini-3.8-flash",
     "models/gemini-3.8-flash",
-    "gemini-1.5-flash-latest",
+    "gemini-1.5-pro-latest",
+    "gemini-1.5-pro",
+    "gemini-2.5-flash",
 ]
 
 def _get_genai_client():
@@ -157,7 +159,7 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     
     # 1. First, attempt predefined models with streaming
     for model_name in MODELS_TO_TRY:
-        for attempt in range(1, 3):
+        for attempt in range(1, 4):  # Try up to 3 times per model
             try:
                 full_response = ""
                 last_edit_time = time.time()
@@ -189,8 +191,10 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 err_str = str(e)
                 errors.append(f"• `{model_name}` (Attempt {attempt}): {err_str}")
                 logger.warning(f"Model {model_name} attempt {attempt} error: {e}")
-                if "503" in err_str or "UNAVAILABLE" in err_str:
-                    await asyncio.sleep(1.0)
+                if "503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str:
+                    # Exponential backoff: 2s, 4s, 8s...
+                    wait_time = 2 ** attempt
+                    await asyncio.sleep(wait_time)
                     continue
                 else:
                     break # Break attempt loop, try next model
