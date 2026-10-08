@@ -11,52 +11,7 @@ from database.db import log_download
 
 logger = logging.getLogger(__name__)
 
-def _get_music_ydl_opts(out_template: str) -> dict:
-    """Builds optimized yt-dlp options for YouTube music search and MP3 download."""
-    opts = {
-        "format": "bestaudio/best",
-        "outtmpl": out_template,
-        "default_search": "ytsearch1",
-        "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }
-        ],
-        "quiet": True,
-        "no_warnings": True,
-        "retries": 10,
-        "fragment_retries": 10,
-        "js_runtimes": {"node": {}, "deno": {}},
-        "remote_components": ["ejs:github"],
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["default", "web_embedded", "mweb", "android"]
-            }
-        },
-    }
-
-    # Automatically load YouTube cookies if present
-    cookie_file = os.getenv("YOUTUBE_COOKIES_FILE", "cookies.txt")
-    if os.path.exists(cookie_file) and os.path.getsize(cookie_file) > 0:
-        opts["cookiefile"] = cookie_file
-    elif os.getenv("YOUTUBE_COOKIES"):
-        try:
-            temp_cookie_path = os.path.join(tempfile.gettempdir(), "render_yt_cookies.txt")
-            with open(temp_cookie_path, "w", encoding="utf-8") as f:
-                f.write(os.getenv("YOUTUBE_COOKIES"))
-            opts["cookiefile"] = temp_cookie_path
-        except Exception:
-            pass
-
-    if shutil.which("aria2c"):
-        opts["external_downloader"] = {"default": "aria2c"}
-        opts["external_downloader_args"] = {
-            "default": ["-x", "16", "-s", "16", "-k", "1M", "--min-split-size=1M"]
-        }
-
-    return opts
+from handlers.downloader import get_speed_ydl_opts
 
 async def song_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Searches YouTube and downloads audio MP3 by song name: /song <title>."""
@@ -77,32 +32,59 @@ async def song_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         out_template = os.path.join(tmp_dir, "%(title)s.%(ext)s")
-        ydl_opts = _get_music_ydl_opts(out_template)
-
+        
         loop = asyncio.get_event_loop()
         info = None
-        try:
-            def _search_and_download():
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    return ydl.extract_info(search_target, download=True)
-
-            info = await loop.run_in_executor(None, _search_and_download)
-        except Exception as e:
-            logger.warning(f"Primary music download failed: {e}. Trying fallback options...")
+        last_err = None
+        
+        for attempt in range(3):
+            ydl_opts = get_speed_ydl_opts(search_target, {
+                "format": "bestaudio/best",
+                "outtmpl": out_template,
+                "default_search": "ytsearch1",
+                "postprocessors": [
+                    {
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "mp3",
+                        "preferredquality": "192",
+                    }
+                ],
+                "max_filesize": 100 * 1024 * 1024, # 100MB limit
+            })
+            
             try:
-                fallback_opts = dict(ydl_opts)
-                fallback_opts.pop("extractor_args", None)
-                def _search_fallback():
-                    with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                def _search_and_download(opts):
+                    with yt_dlp.YoutubeDL(opts) as ydl:
                         return ydl.extract_info(search_target, download=True)
-                info = await loop.run_in_executor(None, _search_fallback)
-            except Exception as e2:
-                logger.error(f"Fallback music download failed: {e2}")
+                info = await loop.run_in_executor(None, _search_and_download, ydl_opts)
+                break
+            except Exception as e:
+                last_err = e
+                err_str = str(e).lower()
+                logger.warning(f"Music download attempt {attempt+1} failed: {e}")
+                
+                if "proxy" in err_str or "socks" in err_str or "timeout" in err_str or "connection" in err_str:
+                    continue
+                
                 try:
-                    await status_msg.edit_text(f"❌ Failed to find or download song: {str(e2)[:150]}")
-                except Exception:
-                    pass
-                return
+                    fallback_opts = dict(ydl_opts)
+                    fallback_opts.pop("extractor_args", None)
+                    def _search_fallback(opts):
+                        with yt_dlp.YoutubeDL(opts) as ydl:
+                            return ydl.extract_info(search_target, download=True)
+                    info = await loop.run_in_executor(None, _search_fallback, fallback_opts)
+                    break
+                except Exception as e2:
+                    last_err = e2
+                    break
+                    
+        if not info:
+            logger.error(f"Fallback music download failed: {last_err}")
+            try:
+                await status_msg.edit_text(f"❌ Failed to find or download song: {str(last_err)[:150]}")
+            except Exception:
+                pass
+            return
 
         if info and "entries" in info and info["entries"]:
             entry = info["entries"][0]

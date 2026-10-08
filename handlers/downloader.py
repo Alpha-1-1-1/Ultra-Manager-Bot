@@ -51,7 +51,7 @@ def get_speed_ydl_opts(url: str = None, extra_opts: dict = None) -> dict:
     }
 
     is_youtube = False
-    if url and ("youtube.com" in url or "youtu.be" in url):
+    if url and ("youtube.com" in url or "youtu.be" in url or "ytsearch" in url):
         is_youtube = True
 
     # Automatically load YouTube cookies if present (bypasses datacenter bot checks)
