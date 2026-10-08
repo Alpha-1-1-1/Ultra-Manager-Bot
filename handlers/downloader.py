@@ -231,41 +231,55 @@ async def process_video_link(url: str, update: Update, context: ContextTypes.DEF
     status_msg = await update.message.reply_text("⚡ Fetching video details...")
 
     # Use datacenter-compatible android/ios clients
-    fast_opts = get_speed_ydl_opts(url, {
-        "skip_download": True,
-        "extract_flat": False,
-    })
-
     loop = asyncio.get_event_loop()
     info = None
-    try:
-        def _extract():
-            with yt_dlp.YoutubeDL(fast_opts) as ydl:
-                return ydl.extract_info(url, download=False)
-
-        info = await loop.run_in_executor(None, _extract)
-    except Exception as e:
-        logger.warning(f"Primary extraction failed: {e}. Trying fallback extractor clients...")
+    last_err = None
+    
+    for attempt in range(3):
+        fast_opts = get_speed_ydl_opts(url, {
+            "skip_download": True,
+            "extract_flat": False,
+        })
+        
         try:
-            # Fallback 1: Pure yt-dlp default with node/deno JS runtime and no player_client override
-            fallback_opts = dict(fast_opts)
-            fallback_opts.pop("extractor_args", None)
-            def _extract_fallback():
-                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+            def _extract(opts):
+                with yt_dlp.YoutubeDL(opts) as ydl:
                     return ydl.extract_info(url, download=False)
-
-            info = await loop.run_in_executor(None, _extract_fallback)
-        except Exception as e2:
-            logger.error(f"Fallback extraction also failed: {e2}")
-            err_str = str(e2)
-            help_tip = ""
-            if "Sign in" in err_str or "bot" in err_str.lower() or "player response" in err_str.lower():
-                help_tip = "\n\n💡 Tip: YouTube may be restricting datacenter requests. You can add a `cookies.txt` or set `YOUTUBE_COOKIES` in Render settings to bypass this."
+            info = await loop.run_in_executor(None, _extract, fast_opts)
+            break
+        except Exception as e:
+            last_err = e
+            err_str = str(e).lower()
+            logger.warning(f"Primary extraction attempt {attempt+1} failed: {e}")
+            
+            # If it's a proxy/connection error, retry with a new random proxy
+            if "proxy" in err_str or "socks" in err_str or "timeout" in err_str or "connection" in err_str:
+                continue
+                
+            # If it's a bot block, try fallback player clients
             try:
-                await status_msg.edit_text(f"❌ Could not retrieve video from link: {err_str[:120]}{help_tip}")
-            except Exception:
-                pass
-            return
+                fallback_opts = dict(fast_opts)
+                fallback_opts.pop("extractor_args", None)
+                def _extract_fallback(opts):
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        return ydl.extract_info(url, download=False)
+                info = await loop.run_in_executor(None, _extract_fallback, fallback_opts)
+                break
+            except Exception as e2:
+                last_err = e2
+                break
+
+    if not info:
+        logger.error(f"Fallback extraction also failed: {last_err}")
+        err_str = str(last_err)
+        help_tip = ""
+        if "Sign in" in err_str or "bot" in err_str.lower() or "player response" in err_str.lower():
+            help_tip = "\n\n💡 Tip: YouTube may be restricting datacenter requests. You can add a `cookies.txt` or set `YOUTUBE_COOKIES` in Render settings to bypass this."
+        try:
+            await status_msg.edit_text(f"❌ Could not retrieve video from link: {err_str[:120]}{help_tip}")
+        except Exception:
+            pass
+        return
 
     try:
         await status_msg.delete()
@@ -483,37 +497,55 @@ async def _execute_video_download(query, context: ContextTypes.DEFAULT_TYPE, ses
             "bestvideo+bestaudio/best"
         )
 
-        ydl_opts = get_speed_ydl_opts(url, {
-            "format": format_str,
-            "outtmpl": out_template,
-            "max_filesize": MAX_DOWNLOAD_LIMIT,
-        })
-
-        if sb:
-            ydl_opts["sponsorblock_remove"] = ["all"]
-        if sc:
-            ydl_opts["split_chapters"] = True
-
         loop = asyncio.get_event_loop()
-        try:
-            def _download():
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    return ydl.extract_info(url, download=True)
+        info = None
+        last_err = None
+        
+        for attempt in range(3):
+            ydl_opts = get_speed_ydl_opts(url, {
+                "format": format_str,
+                "outtmpl": out_template,
+                "max_filesize": MAX_DOWNLOAD_LIMIT,
+            })
 
-            info = await loop.run_in_executor(None, _download)
-        except Exception as e:
-            logger.warning(f"Primary download failed: {e}. Trying fallback download...")
+            if sb:
+                ydl_opts["sponsorblock_remove"] = ["all"]
+            if sc:
+                ydl_opts["split_chapters"] = True
+
             try:
-                fallback_opts = dict(ydl_opts)
-                fallback_opts.pop("extractor_args", None)
-                def _download_fallback():
-                    with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                def _download(opts):
+                    with yt_dlp.YoutubeDL(opts) as ydl:
                         return ydl.extract_info(url, download=True)
-                info = await loop.run_in_executor(None, _download_fallback)
-            except Exception as e2:
-                logger.error(f"Fallback download also failed: {e2}")
-                await progress_msg.edit_text(f"❌ Download failed: {str(e2)[:120]}")
-                return
+
+                info = await loop.run_in_executor(None, _download, ydl_opts)
+                break
+            except Exception as e:
+                last_err = e
+                err_str = str(e).lower()
+                logger.warning(f"Primary download attempt {attempt+1} failed: {e}")
+                
+                # If proxy error, continue to next loop iteration for a fresh proxy
+                if "proxy" in err_str or "socks" in err_str or "timeout" in err_str or "connection" in err_str:
+                    continue
+                    
+                # If bot block, try fallback opts
+                try:
+                    fallback_opts = dict(ydl_opts)
+                    fallback_opts.pop("extractor_args", None)
+                    def _download_fallback(opts):
+                        with yt_dlp.YoutubeDL(opts) as ydl:
+                            return ydl.extract_info(url, download=True)
+                    info = await loop.run_in_executor(None, _download_fallback, fallback_opts)
+                    break
+                except Exception as e2:
+                    last_err = e2
+                    break
+
+        if not info:
+            logger.error(f"Fallback download also failed: {last_err}")
+            await progress_msg.edit_text(f"❌ Download failed: {str(last_err)[:120]}")
+            return
 
         # --- File finding, splitting, and uploading (runs after ANY successful download) ---
         try:
@@ -574,42 +606,58 @@ async def _execute_audio_download(query, context: ContextTypes.DEFAULT_TYPE, ses
     with tempfile.TemporaryDirectory() as tmp_dir:
         out_template = os.path.join(tmp_dir, "%(title)s.%(ext)s")
 
-        ydl_opts = get_speed_ydl_opts(url, {
-            "format": "bestaudio/best",
-            "outtmpl": out_template,
-            "postprocessors": [
-                {
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "192",
-                }
-            ],
-            "max_filesize": MAX_DOWNLOAD_LIMIT,
-        })
-
-        if sb:
-            ydl_opts["sponsorblock_remove"] = ["all"]
-
         loop = asyncio.get_event_loop()
-        try:
-            def _download_audio():
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    return ydl.extract_info(url, download=True)
+        info = None
+        last_err = None
+        
+        for attempt in range(3):
+            ydl_opts = get_speed_ydl_opts(url, {
+                "format": "bestaudio/best",
+                "outtmpl": out_template,
+                "postprocessors": [
+                    {
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "mp3",
+                        "preferredquality": "192",
+                    }
+                ],
+                "max_filesize": MAX_DOWNLOAD_LIMIT,
+            })
 
-            info = await loop.run_in_executor(None, _download_audio)
-        except Exception as e:
-            logger.warning(f"Primary audio download failed: {e}. Trying fallback audio options...")
+            if sb:
+                ydl_opts["sponsorblock_remove"] = ["all"]
+
             try:
-                fallback_opts = dict(ydl_opts)
-                fallback_opts.pop("extractor_args", None)
-                def _download_audio_fallback():
-                    with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                def _download_audio(opts):
+                    with yt_dlp.YoutubeDL(opts) as ydl:
                         return ydl.extract_info(url, download=True)
-                info = await loop.run_in_executor(None, _download_audio_fallback)
-            except Exception as e2:
-                logger.error(f"Fallback audio download also failed: {e2}")
-                await progress_msg.edit_text(f"❌ Audio extraction failed: {str(e2)[:120]}")
-                return
+
+                info = await loop.run_in_executor(None, _download_audio, ydl_opts)
+                break
+            except Exception as e:
+                last_err = e
+                err_str = str(e).lower()
+                logger.warning(f"Audio download attempt {attempt+1} failed: {e}")
+                
+                if "proxy" in err_str or "socks" in err_str or "timeout" in err_str or "connection" in err_str:
+                    continue
+                
+                try:
+                    fallback_opts = dict(ydl_opts)
+                    fallback_opts.pop("extractor_args", None)
+                    def _download_audio_fallback(opts):
+                        with yt_dlp.YoutubeDL(opts) as ydl:
+                            return ydl.extract_info(url, download=True)
+                    info = await loop.run_in_executor(None, _download_audio_fallback, fallback_opts)
+                    break
+                except Exception as e2:
+                    last_err = e2
+                    break
+                    
+        if not info:
+            logger.error(f"Audio fallback download also failed: {last_err}")
+            await progress_msg.edit_text(f"❌ Audio extraction failed: {str(last_err)[:120]}")
+            return
 
         # --- File finding and uploading (runs after ANY successful download) ---
         try:
